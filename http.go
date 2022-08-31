@@ -10,8 +10,8 @@ type httpFile struct {
 	path string
 }
 
-func newHTTPFile(path string) *localFile {
-	return &localFile{path: path}
+func newHTTPFile(path string) *httpFile {
+	return &httpFile{path: path}
 }
 
 func (hf *httpFile) Read() ([]byte, error) {
