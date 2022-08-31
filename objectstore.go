@@ -21,6 +21,10 @@ func New(path string) (Object, error) {
 		return newS3Object(path), nil
 	case "blob":
 		return newAzureBlob(path), nil
+	case "http":
+		return newHTTPFile(path), nil
+	case "https":
+		return newHTTPFile(path), nil
 	default:
 		return newLocalFile(path), nil
 	}
