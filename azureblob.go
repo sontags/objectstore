@@ -4,129 +4,144 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"log"
 	"net/url"
 	"os"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 )
 
 type azureBlob struct {
-	path string
+	basepath string
 }
 
-func newAzureBlob(path string) *azureBlob {
-	return &azureBlob{path: path}
+func newAzureBlob(basepath string) *azureBlob {
+	return &azureBlob{basepath: basepath}
 }
 
-func (ab *azureBlob) Read() ([]byte, error) {
-	account, container, object, err := parseBlobPath(ab.path)
+func (ab *azureBlob) Read(name string) ([]byte, error) {
+	account, container, prefix, err := parseBlobPath(ab.basepath)
 	if err != nil {
 		return []byte{}, err
 	}
-
-	blobClient, err := getBlobClient(account, container, object)
+	object := joinPath(prefix, name)
+	client, err := getBlobClient(account)
 	if err != nil {
 		return []byte{}, err
-	}
-
-	ctx := context.Background()
-
-	resp, err := blobClient.Download(ctx, nil)
-	if err != nil {
-		return []byte{}, err
-	}
-
-	reader := resp.Body(nil)
-	data, err := ioutil.ReadAll(reader)
-	if err != nil {
-		return []byte{}, err
-	}
-	return data, nil
-}
-
-func (ab *azureBlob) Write(data []byte) error {
-	account, container, object, err := parseBlobPath(ab.path)
-	if err != nil {
-		return err
-	}
-
-	blobClient, err := getBlobClient(account, container, object)
-	if err != nil {
-		return err
 	}
 	ctx := context.Background()
-
-	_, err = blobClient.UploadBuffer(ctx, data, azblob.UploadOption{})
+	reader, err := client.DownloadStream(ctx, container, object, nil)
 	if err != nil {
-		return err
+		return []byte{}, err
 	}
-	return nil
+	rs := reader.Body
+	stream := streaming.NewResponseProgress(
+		rs,
+		func(bytesTransferred int64) {},
+	)
+	defer func(stream io.ReadCloser) {
+		err := stream.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(stream)
+	return io.ReadAll(stream)
 }
 
-func (ab *azureBlob) Delete() error {
-	account, container, object, err := parseBlobPath(ab.path)
+func (ab *azureBlob) Write(name string, data []byte) error {
+	account, container, prefix, err := parseBlobPath(ab.basepath)
 	if err != nil {
 		return err
 	}
-
-	blobClient, err := getBlobClient(account, container, object)
+	object := joinPath(prefix, name)
+	client, err := getBlobClient(account)
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
+	_, err = client.UploadBuffer(ctx, container, object, data, nil)
+	return err
+}
 
-	_, err = blobClient.Delete(ctx, nil)
+func (ab *azureBlob) Delete(name string) error {
+	account, container, prefix, err := parseBlobPath(ab.basepath)
 	if err != nil {
 		return err
 	}
-	return nil
+	object := joinPath(prefix, name)
+	client, err := getBlobClient(account)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	_, err = client.DeleteBlob(ctx, container, object, nil)
+	return err
 }
 
-func getBlobClient(account, container, object string) (*azblob.BlockBlobClient, error) {
+func (ab *azureBlob) List() ([]string, error) {
+	files := []string{}
+	account, container, prefix, err := parseBlobPath(ab.basepath)
+	if err != nil {
+		return files, err
+	}
+	client, err := getBlobClient(account)
+	if err != nil {
+		return files, err
+	}
+	ctx := context.Background()
+	var nextMarker *string
+	for {
+		options := &azblob.ListBlobsFlatOptions{
+			Prefix: &prefix,
+			Marker: nextMarker,
+		}
+		p := client.NewListBlobsFlatPager(container, options)
+		data, err := p.NextPage(ctx)
+		if err != nil {
+			return files, err
+		}
+		for _, item := range data.Segment.BlobItems {
+			files = append(files, *item.Name)
+		}
+		if data.NextMarker != nil && *data.NextMarker != "" {
+			nextMarker = data.NextMarker
+		} else {
+			break
+		}
+	}
+	return files, err
+}
+
+func getBlobClient(account string) (*azblob.Client, error) {
 	accountKey, ok := os.LookupEnv("AZURE_STORAGE_ACCOUNT_KEY")
 	if !ok {
 		return nil, errors.New("AZURE_STORAGE_ACCOUNT_KEY could not be found")
 	}
-
 	credential, err := azblob.NewSharedKeyCredential(account, accountKey)
 	if err != nil {
 		return nil, err
 	}
-
 	accountPath := fmt.Sprintf("https://%s.blob.core.windows.net/", account)
-	serviceClient, err := azblob.NewServiceClientWithSharedKey(accountPath, credential, nil)
+	client, err := azblob.NewClientWithSharedKeyCredential(accountPath, credential, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	containerClient, err := serviceClient.NewContainerClient(container)
-	if err != nil {
-		return nil, err
-	}
-
-	blobClient, err := containerClient.NewBlockBlobClient(object)
-	if err != nil {
-		return nil, err
-	}
-
-	return blobClient, nil
+	return client, nil
 }
 
-func parseBlobPath(path string) (account, container, object string, err error) {
+func parseBlobPath(path string) (account, container, prefix string, err error) {
 	uri, err := url.Parse(path)
 	if err != nil {
 		return
 	}
 	fragments := strings.SplitN(strings.TrimPrefix(uri.Path, "/"), "/", 2)
-	if len(fragments) != 2 {
-		err = fmt.Errorf("unusable path '%s'", uri.Path)
-		return
+	if len(fragments) > 1 {
+		prefix = fragments[1]
 	}
-
 	account = uri.Host
 	container = strings.Trim(fragments[0], "/")
-	object = fragments[1]
 	return
 }

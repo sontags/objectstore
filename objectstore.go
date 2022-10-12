@@ -1,31 +1,38 @@
 package objectstore
 
 import (
+	"fmt"
 	"net/url"
+	"strings"
 )
 
 type Object interface {
-	Read() ([]byte, error)
-	Write([]byte) error
-	Delete() error
+	Read(string) ([]byte, error)
+	Write(string, []byte) error
+	Delete(string) error
+	List() ([]string, error)
 }
 
-func New(path string) (Object, error) {
-	uri, err := url.Parse(path)
+func New(basepath string) (Object, error) {
+	uri, err := url.Parse(basepath)
 	if err != nil {
 		return nil, err
 	}
 
 	switch uri.Scheme {
 	case "s3":
-		return newS3Object(path), nil
+		return newS3Object(basepath), nil
 	case "blob":
-		return newAzureBlob(path), nil
-	case "http":
-		return newHTTPFile(path), nil
-	case "https":
-		return newHTTPFile(path), nil
+		return newAzureBlob(basepath), nil
+	case "http", "https":
+		return newHTTPFile(basepath), nil
 	default:
-		return newLocalFile(path), nil
+		return newLocalFile(basepath), nil
 	}
+}
+
+func joinPath(basepath, name string) string {
+	basepath = strings.TrimRight(basepath, "/")
+	name = strings.TrimLeft(name, "/")
+	return fmt.Sprintf("%s/%s", basepath, name)
 }

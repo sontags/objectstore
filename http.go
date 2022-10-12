@@ -2,35 +2,36 @@ package objectstore
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 )
 
 type httpFile struct {
-	path string
+	basepath string
 }
 
-func newHTTPFile(path string) *httpFile {
-	return &httpFile{path: path}
+func newHTTPFile(basepath string) *httpFile {
+	return &httpFile{basepath: basepath}
 }
 
-func (hf *httpFile) Read() ([]byte, error) {
-	res, err := http.Get(hf.path)
+func (hf *httpFile) Read(name string) ([]byte, error) {
+	object := joinPath(hf.basepath, name)
+	res, err := http.Get(object)
 	if err != nil {
 		return []byte{}, err
 	}
 	defer res.Body.Close()
-	data, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return []byte{}, err
-	}
-	return data, nil
+	return io.ReadAll(res.Body)
 }
 
-func (hf *httpFile) Write(data []byte) error {
+func (hf *httpFile) Write(name string, data []byte) error {
 	return fmt.Errorf("HTTP write is not implemented")
 }
 
-func (hf *httpFile) Delete() error {
+func (hf *httpFile) List() ([]string, error) {
+	return []string{}, fmt.Errorf("HTTP list is not implemented")
+}
+
+func (hf *httpFile) Delete(name string) error {
 	return fmt.Errorf("HTTP delete is not implemented")
 }

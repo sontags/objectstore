@@ -2,44 +2,51 @@ package objectstore
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
 
 type localFile struct {
-	path string
+	basepath string
 }
 
-func newLocalFile(path string) *localFile {
-	return &localFile{path: path}
+func newLocalFile(basepath string) *localFile {
+	return &localFile{basepath: basepath}
 }
 
-func (lf *localFile) Read() ([]byte, error) {
-	data, err := ioutil.ReadFile(lf.path)
-	if err != nil {
-		return []byte{}, err
-	}
-	return data, nil
+func (lf *localFile) Read(name string) ([]byte, error) {
+	object := lf.joinPath(lf.basepath, name)
+	return os.ReadFile(object)
 }
 
-func (lf *localFile) Write(data []byte) error {
-	dir := filepath.Dir(lf.path)
+func (lf *localFile) Write(name string, data []byte) error {
+	object := lf.joinPath(lf.basepath, name)
+	dir := filepath.Dir(object)
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return fmt.Errorf("'%s' does not exist or is not a directory", dir)
 	}
-
-	err := ioutil.WriteFile(lf.path, data, 0640)
-	if err != nil {
-		return err
-	}
-	return nil
+	return os.WriteFile(object, data, 0640)
 }
 
-func (lf *localFile) Delete() error {
-	err := os.Remove(lf.path)
-	if err != nil {
-		return err
-	}
-	return nil
+func (lf *localFile) List() ([]string, error) {
+	files := []string{}
+	err := filepath.Walk(lf.basepath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			files = append(files, info.Name())
+		}
+		return nil
+	})
+	return files, err
+}
+
+func (lf *localFile) Delete(name string) error {
+	object := lf.joinPath(lf.basepath, name)
+	return os.Remove(object)
+}
+
+func (lf *localFile) joinPath(basepath, name string) string {
+	return filepath.Join(basepath, name)
 }

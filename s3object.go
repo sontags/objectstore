@@ -2,97 +2,137 @@ package objectstore
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type s3Object struct {
-	path string
+	basepath string
 }
 
-func newS3Object(path string) *s3Object {
-	return &s3Object{path: path}
+func newS3Object(basepath string) *s3Object {
+	return &s3Object{basepath: basepath}
 }
 
-func (s3o *s3Object) Read() ([]byte, error) {
-	bucket, object, err := parseS3Path(s3o.path)
+func (s3o *s3Object) Read(name string) ([]byte, error) {
+	bucket, prefix, err := parseS3Path(s3o.basepath)
 	if err != nil {
 		return []byte{}, err
 	}
-
-	s3svc := s3.New(session.New())
-	input := &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(object),
-	}
-
-	result, err := s3svc.GetObject(input)
+	object := joinPath(prefix, name)
+	client, err := getS3Client()
 	if err != nil {
 		return []byte{}, err
 	}
-
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(result.Body)
-
-	data := []byte{}
-	file := buf.Bytes()
-	if len(file) > 0 {
-		data = append(data, file...)
+	ctx := context.Background()
+	params := &s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &object,
 	}
-	return data, nil
+	obj, err := client.GetObject(ctx, params)
+	if err != nil {
+		return []byte{}, err
+	}
+	return io.ReadAll(obj.Body)
 }
 
-func (s3o *s3Object) Write(data []byte) error {
-	bucket, object, err := parseS3Path(s3o.path)
+func (s3o *s3Object) Write(name string, data []byte) error {
+	bucket, prefix, err := parseS3Path(s3o.basepath)
 	if err != nil {
 		return err
 	}
-
-	s3svc := s3.New(session.New())
-	input := &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(object),
-		ACL:    aws.String("private"),
+	object := joinPath(prefix, name)
+	client, err := getS3Client()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	ct := http.DetectContentType(data)
+	params := &s3.PutObjectInput{
+		Bucket: &bucket,
+		Key:    &object,
+		ACL:    types.ObjectCannedACLPrivate,
 		Body:   bytes.NewReader(data),
 		//ContentLength: aws.Int64(len(data)),
-		ContentType: aws.String(http.DetectContentType(data)),
+		ContentType: &ct,
 	}
-
-	_, err = s3svc.PutObject(input)
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err = client.PutObject(ctx, params)
+	return err
 }
 
-func (s3o *s3Object) Delete() error {
-	bucket, object, err := parseS3Path(s3o.path)
+func (s3o *s3Object) Delete(name string) error {
+	bucket, prefix, err := parseS3Path(s3o.basepath)
 	if err != nil {
 		return err
 	}
-	s3svc := s3.New(session.New())
+	object := joinPath(prefix, name)
+	client, err := getS3Client()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
 	input := &s3.DeleteObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(object),
+		Bucket: &bucket,
+		Key:    &object,
 	}
-
-	_, err = s3svc.DeleteObject(input)
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err = client.DeleteObject(ctx, input)
+	return err
 }
 
-func parseS3Path(path string) (bucket, object string, err error) {
+func (s3o *s3Object) List() ([]string, error) {
+	files := []string{}
+	bucket, prefix, err := parseS3Path(s3o.basepath)
+	if err != nil {
+		return files, err
+	}
+	client, err := getS3Client()
+	if err != nil {
+		return files, err
+	}
+	ctx := context.Background()
+	params := &s3.ListObjectsV2Input{
+		Bucket: &bucket,
+		Prefix: &prefix,
+	}
+	p := s3.NewListObjectsV2Paginator(client, params, func(o *s3.ListObjectsV2PaginatorOptions) {
+		if v := int32(100); v != 0 {
+			o.Limit = v
+		}
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return files, err
+		}
+		for _, obj := range page.Contents {
+			name := strings.TrimPrefix(*obj.Key, prefix+"/")
+			files = append(files, name)
+		}
+	}
+	return files, err
+}
+
+func getS3Client() (*s3.Client, error) {
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		return nil, err
+	}
+	return s3.NewFromConfig(cfg), nil
+}
+
+func parseS3Path(path string) (bucket, prefix string, err error) {
 	uri, err := url.Parse(path)
 	if err != nil {
 		return
 	}
 	bucket = uri.Host
-	object = uri.Path
+	prefix = uri.Path
 	return
 }
